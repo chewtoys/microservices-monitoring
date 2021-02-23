@@ -1,0 +1,240 @@
+version: '3.1'
+
+services:
+
+  prometheus:
+    image: prom/prometheus:v2.24.1
+    command: 
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    networks:
+      - proxy
+      - default
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus
+    depends_on:
+      - alertmanager
+      - node-exporter
+      - cadvisor
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.prometheus-backend.loadbalancer.server.port=9090"
+      - "traefik.http.routers.prometheus-backend.service=prometheus-backend"
+      - "traefik.http.routers.prometheus-backend.entrypoints=http"
+      - "traefik.docker.network=proxy"
+    
+  alertmanager:
+    image: prom/alertmanager:v0.21.0
+    ports:
+      - "9093:9093"
+    networks:
+      - proxy
+      - default
+    volumes:
+        - ./alertmanager:/etc/alertmanager
+    restart: always
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.alertmanager.loadbalancer.server.port=9093"
+      - "traefik.http.routers.alertmanager.service=alertmanager"
+      - "traefik.http.routers.alertmanager.entrypoints=http"
+      - "traefik.docker.network=proxy"
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    expose:
+      - "9100-9100"
+    networks:
+      - proxy
+      - default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.node-exporter.loadbalancer.server.port=9100"
+      - "traefik.http.routers.node-exporter.service=node-exporter"
+      - "traefik.http.routers.node-exporter.entrypoints=http"
+      - "traefik.docker.network=proxy"
+
+  cadvisor:
+    image: google/cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "11080:8080"
+    networks:
+      - proxy
+      - default
+    restart: always
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.cadvisor.loadbalancer.server.port=8080"
+      - "traefik.http.routers.cadvisor.service=cadvisor"
+      - "traefik.http.routers.cadvisor.entrypoints=http"
+      - "traefik.docker.network=proxy"
+
+  grafana:
+    image: grafana/grafana:7.4.0
+    restart: unless-stopped
+    networks:
+      - proxy
+      - default
+    ports:
+      - "10000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=MY_GRAFANA_PW
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel, grafana-piechart-panel, grafana-piechart-panel
+    depends_on:
+      - prometheus
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+      - "traefik.http.routers.grafana.service=grafana"
+      - "traefik.http.routers.grafana.entrypoints=http"
+      - "traefik.docker.network=proxy"
+
+  ui:
+    image: 'ui'
+    build:
+      context: ./
+      dockerfile: ./web-client.df
+    restart: always
+    networks:
+    - proxy
+    - default
+    ports:
+      - "9000-9001:80"
+    deploy:
+      replicas: 2
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ui.entrypoints=http"
+      - "traefik.backend=ui:9000-9001"
+      - "traefik.http.routers.ui.rule=PathPrefix(`/ui`)"
+      - "traefik.http.middlewares.uipathstrip.stripprefix.prefixes=/ui"
+      - "traefik.http.routers.ui.middlewares=uipathstrip@docker"
+      - "traefik.docker.network=proxy"
+
+  webservice-0:
+    image: 'webservice-0'
+    build:
+      context: ./webservice-0
+      dockerfile: ./Dockerfile
+    restart: always
+    networks:
+    - proxy
+    - default
+    ports:
+      - 9002-9003:8000
+    deploy:
+      replicas: 2
+    healthcheck:
+      test: curl -f -s http://localhost:8000/ || exit 1
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.webservice0.entrypoints=http"
+      - "traefik.backend=webservice0:9002-9003"
+      - "traefik.http.routers.webservice0.rule=PathPrefix(`/webservice0/`)"
+      - "traefik.http.middlewares.webservice0pathstrip.stripprefix.prefixes=/webservice0"
+      - "traefik.http.routers.webservice0.middlewares=webservice0pathstrip@docker"
+      - "traefik.docker.network=proxy"
+
+  webservice-1:
+    image: 'webservice-1'
+    build:
+      context: ./webservice-1
+      dockerfile: ./Dockerfile
+    restart: always
+    depends_on:
+      - db
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://db:5432/compose-postgres
+      - SPRING_DATASOURCE_USERNAME=compose-postgres
+      - SPRING_DATASOURCE_PASSWORD=compose-postgres
+      - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+    networks:
+    - proxy
+    - default
+    ports:
+      - 9004-9006:8080
+    deploy:
+      replicas: 2
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.webservice1.entrypoints=http"
+      - "traefik.backend=webservice1:9004-9006"
+      - "traefik.http.routers.webservice1.rule=PathPrefix(`/webservice1/`)"
+      - "traefik.http.middlewares.webservice1pathstrip.stripprefix.prefixes=/webservice1"
+      - "traefik.http.routers.webservice1.middlewares=webservice1pathstrip@docker"
+      - "traefik.docker.network=proxy"
+
+  db:
+    image: 'postgres:13.1-alpine'
+    restart: always
+    networks:
+      - proxy
+      - default
+    environment:
+      - POSTGRES_USER=compose-postgres
+      - POSTGRES_PASSWORD=compose-postgres
+    labels:
+      - "traefik.http.routers.db.entrypoints=http"
+
+  reverse-proxy:
+    image: traefik:v2.3
+    container_name: reverse-proxy
+    command: 
+    - "--providers.docker=true"
+    - '--entryPoints.http.address=:80'
+    - '--entryPoints.metrics.address=:8082'
+    - '--providers.providersThrottleDuration=2s'
+    - '--providers.docker.watch=true'
+    - '--api=true'
+    - '--api.dashboard=true'
+    - '--api.insecure=true'
+    - '--ping.entryPoint=http'
+    - '--metrics.prometheus=true'
+    - '--metrics.prometheus.addEntryPointsLabels=true'
+    - '--metrics.prometheus.addServicesLabels=true'
+    - '--metrics.prometheus.manualrouting=true'
+    ports:
+      # The HTTP port
+      - 80:80
+      - 8080:8080
+    volumes:
+      # So that Traefik can listen to the Docker events
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - proxy
+      - default
+    labels:
+      - 'traefik.http.services.prometheus.loadbalancer.server.port=8082'
+      - 'traefik.http.routers.prometheus.rule=PathPrefix(`/metrics`)'
+      - 'traefik.http.routers.prometheus.service=prometheus@internal'
+      - 'traefik.http.routers.prometheus.entrypoints=metrics'
+      - 'traefik.http.routers.traefik-dashboard.entrypoints=http'
+
+
+networks:
+  proxy:
+    driver: bridge
